@@ -90,41 +90,63 @@ def find_abends(folder, watch_jobs):
         events = []
         if not os.path.exists(folder):
                 raise SystemExit(f"Configured folder does not exist: {folder}")
+        
+        # First pass: count total files to scan
+        print("Counting files...", end='', flush=True)
+        all_files = []
         for root, dirs, files in os.walk(folder):
                 for fname in files:
                         path = os.path.join(root, fname)
                         # Skip typical binary files by extension heuristics (optional)
                         if any(path.lower().endswith(ext) for ext in ('.zip', '.gz', '.tar', '.jpg', '.png', '.exe', '.dll')):
                                 continue
-                        try:
-                                with open(path, 'r', errors='ignore') as fh:
-                                        for line_no, line in enumerate(fh, start=1):
-                                                m = ABEND_RE.search(line)
-                                                if not m:
-                                                        continue
-                                                job = m.group('job').upper()
-                                                sched = m.group('sched')
-                                                date_s = m.group('date')  # dd.mm.yyyy
-                                                time_s = m.group('time')  # hh:mm:ss
-                                                try:
-                                                        dt = datetime.strptime(f"{date_s} {time_s}", "%d.%m.%Y %H:%M:%S")
-                                                except ValueError:
-                                                        # skip unparsable date/time
-                                                        continue
-                                                if watch_jobs and job not in watch_jobs:
-                                                        continue
-                                                events.append({
-                                                        'dt': dt,
-                                                        'month': (dt.month, dt.strftime('%B')),
-                                                        'job': job,
-                                                        'sched': sched,
-                                                        'file': path,
-                                                        'line_no': line_no,
-                                                        'raw': line.strip()
-                                                })
-                        except (OSError, UnicodeError):
-                                # ignore unreadable files
-                                continue
+                        all_files.append(path)
+        
+        total_files = len(all_files)
+        print(f" {total_files} files to scan")
+        
+        if total_files == 0:
+                print("No files to scan")
+                return events
+        
+        # Second pass: scan files with progress indicator
+        for idx, path in enumerate(all_files, start=1):
+                # Calculate and display progress
+                progress = (idx / total_files) * 100
+                print(f"\rScanning: {progress:5.1f}% ({idx}/{total_files}) - {os.path.basename(path)[:50]:<50}", end='', flush=True)
+                
+                try:
+                        with open(path, 'r', errors='ignore') as fh:
+                                for line_no, line in enumerate(fh, start=1):
+                                        m = ABEND_RE.search(line)
+                                        if not m:
+                                                continue
+                                        job = m.group('job').upper()
+                                        sched = m.group('sched')
+                                        date_s = m.group('date')  # dd.mm.yyyy
+                                        time_s = m.group('time')  # hh:mm:ss
+                                        try:
+                                                dt = datetime.strptime(f"{date_s} {time_s}", "%d.%m.%Y %H:%M:%S")
+                                        except ValueError:
+                                                # skip unparsable date/time
+                                                continue
+                                        if watch_jobs and job not in watch_jobs:
+                                                continue
+                                        events.append({
+                                                'dt': dt,
+                                                'month': (dt.month, dt.strftime('%B')),
+                                                'job': job,
+                                                'sched': sched,
+                                                'file': path,
+                                                'line_no': line_no,
+                                                'raw': line.strip()
+                                        })
+                except (OSError, UnicodeError):
+                        # ignore unreadable files
+                        continue
+        
+        print(f"\rScanning: 100.0% ({total_files}/{total_files}) - Complete!{' '*50}")
+        print(f"Found {len(events)} matching ABEND event(s)")
         return events
 
 def build_report(events):
