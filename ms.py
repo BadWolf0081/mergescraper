@@ -281,7 +281,7 @@ def build_report(abend_events, success_events):
                         for e in sorted(g['items'], key=lambda x: x['dt']):
                                 dt_s = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
                                 server = e.get('server', '')
-                                sched_info = f"{server}#{e['sched']}" if server else e['sched']
+                                sched_info = f"{e['sched']}#{server}" if server else e['sched']
                                 report_lines.append(f" - {e['job']} (schedule {sched_info}) at {dt_s}")
                 report_lines.append("")
         
