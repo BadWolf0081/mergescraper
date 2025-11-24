@@ -29,11 +29,12 @@ Requires 'mail' command (usually provided by mailutils or mailx package on Linux
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
-# Regex to extract time, date, schedule, job from the example lines.
+# Regex to extract time, date, server, schedule, job from ABEND lines.
+# Handles both formats: SERVER#SCHEDULE[...].JOB and SCHEDULE[...].JOB
 ABEND_RE = re.compile(
         r'(?P<time>\d{2}:\d{2}:\d{2})\s+'
         r'(?P<date>\d{2}\.\d{2}\.\d{4}).*?following job has stopped unexpectedly:\s+'
-        r'(?P<sched>[^\[\].\s]+)\[.*?\]\.(?P<job>[^\s(]+)',
+        r'(?:(?P<server>\w+)#)?(?P<sched>[^\[\].\s#]+)\[.*?\]\.(?P<job>[^\s(]+)',
         re.IGNORECASE
 )
 
@@ -209,6 +210,7 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                                                 if m:
                                                         job = m.group('job').upper()
                                                         sched = m.group('sched')
+                                                        server = m.group('server') if m.group('server') else ''
                                                         date_s = m.group('date')  # dd.mm.yyyy
                                                         time_s = m.group('time')  # hh:mm:ss
                                                         try:
@@ -230,6 +232,7 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                                                                 'month': (dt.month, dt.strftime('%B')),
                                                                 'job': job,
                                                                 'sched': sched,
+                                                                'server': server,
                                                                 'file': path,
                                                                 'line_no': line_no,
                                                                 'raw': line.strip(),
@@ -304,7 +307,9 @@ def build_report(abend_events, success_events):
                         report_lines.append(f"\nIn {g['name']} these abends occurred:")
                         for e in sorted(g['items'], key=lambda x: x['dt']):
                                 dt_s = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
-                                report_lines.append(f" - {e['job']} (schedule {e['sched']}) at {dt_s}")
+                                server = e.get('server', '')
+                                sched_info = f"{e['sched']}#{server}" if server else e['sched']
+                                report_lines.append(f" - {e['job']} (schedule {sched_info}) at {dt_s}")
                 report_lines.append("")
         
         # Report SUCCESS events
