@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import subprocess
+import argparse
 from datetime import datetime
 import configparser
 
@@ -26,8 +27,6 @@ Requires 'mail' command (usually provided by mailutils or mailx package on Linux
 
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-CONFIG_PATH = os.path.join(SCRIPT_DIR, "scan_config.ini")
-TARGETS_PATH = os.path.join(SCRIPT_DIR, "targets.cfg")
 
 # Regex to extract time, date, schedule, job from the example lines.
 ABEND_RE = re.compile(
@@ -37,36 +36,36 @@ ABEND_RE = re.compile(
         re.IGNORECASE
 )
 
-def ensure_config_files():
+def ensure_config_files(config_path, targets_path):
         """Create template config files if they don't exist."""
-        if not os.path.exists(CONFIG_PATH):
+        if not os.path.exists(config_path):
                 cfg = configparser.ConfigParser()
                 cfg['scan'] = {'folder': '.'}
-                with open(CONFIG_PATH, 'w') as f:
+                with open(config_path, 'w') as f:
                         cfg.write(f)
 
-        if not os.path.exists(TARGETS_PATH):
-                with open(TARGETS_PATH, 'w') as f:
+        if not os.path.exists(targets_path):
+                with open(targets_path, 'w') as f:
                         f.write("# email= recipient address for the abend report\n")
                         f.write("# jobs= comma-separated list of job names to report (case-insensitive)\n")
                         f.write("email=you@example.com\n")
                         f.write("jobs=TEST_ABEND,ANOTHER_JOB\n")
 
-def read_scan_config():
+def read_scan_config(config_path):
         cfg = configparser.ConfigParser()
-        cfg.read(CONFIG_PATH)
+        cfg.read(config_path)
         if 'scan' not in cfg:
-                raise SystemExit("Missing [scan] section in scan_config.ini")
+                raise SystemExit(f"Missing [scan] section in {config_path}")
         section = cfg['scan']
         folder = section.get('folder', '.')
         return folder
 
-def read_targets():
+def read_targets(targets_path):
         email = None
         jobs = []
-        if not os.path.exists(TARGETS_PATH):
-                raise SystemExit("Missing targets.cfg")
-        with open(TARGETS_PATH, 'r') as f:
+        if not os.path.exists(targets_path):
+                raise SystemExit(f"Missing targets file: {targets_path}")
+        with open(targets_path, 'r') as f:
                 for line in f:
                         line = line.strip()
                         if not line or line.startswith('#'):
@@ -190,14 +189,26 @@ def send_email_via_mail(to_addr, subject, body):
                 raise RuntimeError(f"mail command failed: {stderr.decode('utf-8')}")
 
 def main():
-        ensure_config_files()
-        folder = read_scan_config()
-        to_email, jobs = read_targets()
+        parser = argparse.ArgumentParser(description='Scan files for ABEND events and send report via email')
+        parser.add_argument('-c', '--config', 
+                          default=os.path.join(SCRIPT_DIR, "scan_config.ini"),
+                          help='Path to config file (default: scan_config.ini)')
+        parser.add_argument('-t', '--targets',
+                          default=os.path.join(SCRIPT_DIR, "targets.cfg"),
+                          help='Path to targets file (default: targets.cfg)')
+        args = parser.parse_args()
+        
+        config_path = args.config
+        targets_path = args.targets
+        
+        ensure_config_files(config_path, targets_path)
+        folder = read_scan_config(config_path)
+        to_email, jobs = read_targets(targets_path)
         if not to_email:
-                print("No recipient email configured in targets.cfg (email=...). Aborting.")
+                print(f"No recipient email configured in {targets_path} (email=...). Aborting.")
                 sys.exit(1)
         if not jobs:
-                print("No jobs configured in targets.cfg (jobs=...). Aborting.")
+                print(f"No jobs configured in {targets_path} (jobs=...). Aborting.")
                 sys.exit(1)
 
         watch_jobs = set(jobs)  # uppercase already from read_targets
