@@ -36,6 +36,14 @@ ABEND_RE = re.compile(
         re.IGNORECASE
 )
 
+# Regex for successful job completion
+# Example: 07:01:39 24.11.2025|BATCHMAN:Job VEL3009LAM#JOBS[(0731 11/23/25),(JOBS)].LS (#J1138883) has completed SUCCESSFULLY
+SUCCESS_RE = re.compile(
+        r'(?P<time>\d{2}:\d{2}:\d{2})\s+'
+        r'(?P<date>\d{2}\.\d{2}\.\d{4}).*?Job\s+(?P<server>\w+)#(?P<sched>[^\[\].\s]+)\[.*?\]\.(?P<job>[^\s(]+)\s+.*?has completed SUCCESSFULLY',
+        re.IGNORECASE
+)
+
 def ensure_config_files(config_path, targets_path):
         """Create template config files if they don't exist."""
         if not os.path.exists(config_path):
@@ -47,9 +55,15 @@ def ensure_config_files(config_path, targets_path):
         if not os.path.exists(targets_path):
                 with open(targets_path, 'w') as f:
                         f.write("# email= recipient address for the abend report\n")
-                        f.write("# jobs= comma-separated list of job names to report (case-insensitive)\n")
+                        f.write("# jobs= comma-separated list of job names to report (case-insensitive, supports @ wildcard)\n")
+                        f.write("# abend= Yes to include abend events in report (default: Yes)\n")
+                        f.write("# success= Yes to include success events in report (default: No)\n")
+                        f.write("# report_period= Daily, Weekly, or Monthly - filters events by timeframe (default: Monthly)\n")
                         f.write("email=you@example.com\n")
                         f.write("jobs=TEST_ABEND,ANOTHER_JOB\n")
+                        f.write("abend=Yes\n")
+                        f.write("success=No\n")
+                        f.write("report_period=Monthly\n")
 
 def read_scan_config(config_path):
         cfg = configparser.ConfigParser()
@@ -63,6 +77,9 @@ def read_scan_config(config_path):
 def read_targets(targets_path):
         email = None
         jobs = []
+        include_abend = True  # default
+        include_success = False  # default
+        report_period = 'monthly'  # default
         if not os.path.exists(targets_path):
                 raise SystemExit(f"Missing targets file: {targets_path}")
         with open(targets_path, 'r') as f:
@@ -80,7 +97,17 @@ def read_targets(targets_path):
                         elif k == 'jobs':
                                 # Keep @ wildcard intact, convert to uppercase
                                 jobs = [j.strip().upper() for j in v.split(',') if j.strip()]
-        return email, jobs
+                        elif k == 'abend':
+                                include_abend = v.lower() in ('yes', 'true', '1')
+                        elif k == 'success':
+                                include_success = v.lower() in ('yes', 'true', '1')
+                        elif k == 'report_period':
+                                rp = v.lower()
+                                if rp in ('daily', 'weekly', 'monthly'):
+                                        report_period = rp
+                                else:
+                                        print(f"Warning: Invalid report_period '{v}', using 'monthly'")
+        return email, jobs, include_abend, include_success, report_period
 
 def job_matches(job, watch_jobs):
         """
@@ -110,13 +137,15 @@ def job_matches(job, watch_jobs):
                                 return True
         return False
 
-def find_abends(folder, watch_jobs):
+def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
         """
-        Walk files under folder, extract abend events for jobs in watch_jobs.
-        Returns list of dicts: {'dt': datetime, 'month': (num,name), 'job': str, 'sched': str, 'file': str, 'line': str}
+        Walk files under folder, extract abend and/or success events for jobs in watch_jobs.
+        Returns tuple: (abend_events, success_events)
+        Each is a list of dicts: {'dt': datetime, 'month': (num,name), 'job': str, 'sched': str, 'file': str, 'line': str}
         Supports @ wildcard in job patterns (e.g., JOBNAME@ matches JOBNAME*)
         """
-        events = []
+        abend_events = []
+        success_events = []
         if not os.path.exists(folder):
                 raise SystemExit(f"Configured folder does not exist: {folder}")
         
@@ -139,7 +168,7 @@ def find_abends(folder, watch_jobs):
         
         if total_files == 0:
                 print("No files to scan")
-                return events
+                return abend_events, success_events
         
         # Second pass: scan files with progress indicator
         for idx, path in enumerate(all_files, start=1):
@@ -150,60 +179,202 @@ def find_abends(folder, watch_jobs):
                 try:
                         with open(path, 'r', errors='ignore') as fh:
                                 for line_no, line in enumerate(fh, start=1):
-                                        m = ABEND_RE.search(line)
-                                        if not m:
-                                                continue
-                                        job = m.group('job').upper()
-                                        sched = m.group('sched')
-                                        date_s = m.group('date')  # dd.mm.yyyy
-                                        time_s = m.group('time')  # hh:mm:ss
-                                        try:
-                                                dt = datetime.strptime(f"{date_s} {time_s}", "%d.%m.%Y %H:%M:%S")
-                                        except ValueError:
-                                                # skip unparsable date/time
-                                                continue
-                                        if not job_matches(job, watch_jobs):
-                                                continue
-                                        events.append({
-                                                'dt': dt,
-                                                'month': (dt.month, dt.strftime('%B')),
-                                                'job': job,
-                                                'sched': sched,
-                                                'file': path,
-                                                'line_no': line_no,
-                                                'raw': line.strip()
-                                        })
+                                        # Check for ABEND events
+                                        if track_abends:
+                                                m = ABEND_RE.search(line)
+                                                if m:
+                                                        job = m.group('job').upper()
+                                                        sched = m.group('sched')
+                                                        date_s = m.group('date')  # dd.mm.yyyy
+                                                        time_s = m.group('time')  # hh:mm:ss
+                                                        try:
+                                                                dt = datetime.strptime(f"{date_s} {time_s}", "%d.%m.%Y %H:%M:%S")
+                                                        except ValueError:
+                                                                continue
+                                                        if not job_matches(job, watch_jobs):
+                                                                continue
+                                                        abend_events.append({
+                                                                'dt': dt,
+                                                                'month': (dt.month, dt.strftime('%B')),
+                                                                'job': job,
+                                                                'sched': sched,
+                                                                'file': path,
+                                                                'line_no': line_no,
+                                                                'raw': line.strip()
+                                                        })
+                                        
+                                        # Check for SUCCESS events
+                                        if track_successes:
+                                                m = SUCCESS_RE.search(line)
+                                                if m:
+                                                        job = m.group('job').upper()
+                                                        sched = m.group('sched')
+                                                        server = m.group('server')
+                                                        date_s = m.group('date')
+                                                        time_s = m.group('time')
+                                                        try:
+                                                                dt = datetime.strptime(f"{date_s} {time_s}", "%d.%m.%Y %H:%M:%S")
+                                                        except ValueError:
+                                                                continue
+                                                        if not job_matches(job, watch_jobs):
+                                                                continue
+                                                        success_events.append({
+                                                                'dt': dt,
+                                                                'month': (dt.month, dt.strftime('%B')),
+                                                                'job': job,
+                                                                'sched': sched,
+                                                                'server': server,
+                                                                'file': path,
+                                                                'line_no': line_no,
+                                                                'raw': line.strip()
+                                                        })
                 except (OSError, UnicodeError):
                         # ignore unreadable files
                         continue
         
         print(f"\rScanning: 100.0% ({total_files}/{total_files}) - Complete!{' '*50}")
-        print(f"Found {len(events)} matching ABEND event(s)")
-        return events
+        if track_abends:
+                print(f"Found {len(abend_events)} ABEND event(s)")
+        if track_successes:
+                print(f"Found {len(success_events)} SUCCESS event(s)")
+        return abend_events, success_events
 
-def build_report(events):
+def build_report(abend_events, success_events):
         """Return a plain-text report grouped by month in chronological month order."""
-        if not events:
-                return "No ABEND events found.\n"
-
-        # Group by month number
-        groups = {}
-        for e in events:
-                mnum, mname = e['month']
-                groups.setdefault(mnum, {'name': mname, 'items': []})
-                groups[mnum]['items'].append(e)
-
         report_lines = []
-        report_lines.append(f"ABEND Report generated: {datetime.now().isoformat()}\n")
-        for mnum in sorted(groups.keys()):
-                g = groups[mnum]
-                report_lines.append(f"In {g['name']} these abends occurred:")
-                # sort by datetime
-                for e in sorted(g['items'], key=lambda x: x['dt']):
-                        dt_s = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
-                        report_lines.append(f" - {e['job']} (schedule {e['sched']}) at {dt_s}  -- file: {e['file']}:{e['line_no']}")
-                report_lines.append("")  # blank line
+        report_lines.append(f"Job Events Report generated: {datetime.now().isoformat()}\n")
+        
+        # Report ABEND events
+        if abend_events:
+                report_lines.append("=" * 70)
+                report_lines.append("ABEND EVENTS")
+                report_lines.append("=" * 70)
+                groups = {}
+                for e in abend_events:
+                        mnum, mname = e['month']
+                        groups.setdefault(mnum, {'name': mname, 'items': []})
+                        groups[mnum]['items'].append(e)
+                
+                for mnum in sorted(groups.keys()):
+                        g = groups[mnum]
+                        report_lines.append(f"\nIn {g['name']} these abends occurred:")
+                        for e in sorted(g['items'], key=lambda x: x['dt']):
+                                dt_s = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
+                                report_lines.append(f" - {e['job']} (schedule {e['sched']}) at {dt_s}")
+                report_lines.append("")
+        
+        # Report SUCCESS events
+        if success_events:
+                report_lines.append("=" * 70)
+                report_lines.append("SUCCESS EVENTS")
+                report_lines.append("=" * 70)
+                groups = {}
+                for e in success_events:
+                        mnum, mname = e['month']
+                        groups.setdefault(mnum, {'name': mname, 'items': []})
+                        groups[mnum]['items'].append(e)
+                
+                for mnum in sorted(groups.keys()):
+                        g = groups[mnum]
+                        report_lines.append(f"\nIn {g['name']} these successes occurred:")
+                        for e in sorted(g['items'], key=lambda x: x['dt']):
+                                dt_s = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
+                                server_info = f" on {e['server']}" if 'server' in e else ""
+                                report_lines.append(f" - {e['job']} (schedule {e['sched']}){server_info} at {dt_s}")
+                report_lines.append("")
+        
+        if not abend_events and not success_events:
+                report_lines.append("No events found.\n")
+        
         return "\n".join(report_lines)
+
+def append_to_log(log_path, events, event_type):
+        """Append events to a daily log file with deduplication."""
+        # Read existing events to avoid duplicates
+        existing = set()
+        if os.path.exists(log_path):
+                with open(log_path, 'r') as f:
+                        for line in f:
+                                existing.add(line.strip())
+        
+        # Append new unique events
+        new_count = 0
+        with open(log_path, 'a') as f:
+                for e in events:
+                        dt_s = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
+                        server_info = f"|{e['server']}" if 'server' in e else ""
+                        log_line = f"{dt_s}|{e['job']}|{e['sched']}{server_info}|{e['file']}:{e['line_no']}"
+                        if log_line not in existing:
+                                f.write(log_line + "\n")
+                                existing.add(log_line)
+                                new_count += 1
+        
+        return new_count
+
+def filter_events_by_period(events, period):
+        """Filter events to only include those within the specified time period."""
+        if not events:
+                return events
+        
+        now = datetime.now()
+        
+        if period == 'daily':
+                # Last 24 hours
+                cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == 'weekly':
+                # Last 7 days
+                cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                cutoff = cutoff.replace(day=cutoff.day - 7) if cutoff.day > 7 else cutoff.replace(month=cutoff.month - 1 if cutoff.month > 1 else 12, day=cutoff.day + 23, year=cutoff.year if cutoff.month > 1 else cutoff.year - 1)
+        elif period == 'monthly':
+                # Current month
+                cutoff = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        else:
+                # Default: no filtering
+                return events
+        
+        filtered = [e for e in events if e['dt'] >= cutoff]
+        return filtered
+
+def read_log_events(log_path, event_type):
+        """Read events from daily log file."""
+        events = []
+        if not os.path.exists(log_path):
+                return events
+        
+        with open(log_path, 'r') as f:
+                for line in f:
+                        line = line.strip()
+                        if not line:
+                                continue
+                        parts = line.split('|')
+                        if len(parts) < 4:
+                                continue
+                        
+                        try:
+                                dt = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
+                                job = parts[1]
+                                sched = parts[2]
+                                file_info = parts[3]
+                                
+                                event = {
+                                        'dt': dt,
+                                        'month': (dt.month, dt.strftime('%B')),
+                                        'job': job,
+                                        'sched': sched,
+                                        'file': file_info,
+                                        'line_no': 0
+                                }
+                                
+                                # Add server info for success events
+                                if event_type == 'success' and len(parts) > 4:
+                                        event['server'] = parts[2]
+                                        event['sched'] = parts[3] if len(parts) > 3 else ''
+                                
+                                events.append(event)
+                        except (ValueError, IndexError):
+                                continue
+        
+        return events
 
 def send_email_via_mail(to_addr, subject, body):
         """Send email using Linux mail command."""
@@ -219,32 +390,85 @@ def send_email_via_mail(to_addr, subject, body):
                 raise RuntimeError(f"mail command failed: {stderr.decode('utf-8')}")
 
 def main():
-        parser = argparse.ArgumentParser(description='Scan files for ABEND events and send report via email')
+        parser = argparse.ArgumentParser(description='Scan files for ABEND and SUCCESS events and send report via email')
         parser.add_argument('-c', '--config', 
                           default=os.path.join(SCRIPT_DIR, "scan_config.ini"),
                           help='Path to config file (default: scan_config.ini)')
         parser.add_argument('-t', '--targets',
                           default=os.path.join(SCRIPT_DIR, "targets.cfg"),
                           help='Path to targets file (default: targets.cfg)')
+        parser.add_argument('-d', '--daily', action='store_true',
+                          help='Daily mode: scan and append to log files without sending email')
         args = parser.parse_args()
         
         config_path = args.config
         targets_path = args.targets
+        daily_mode = args.daily
         
         ensure_config_files(config_path, targets_path)
         folder = read_scan_config(config_path)
-        to_email, jobs = read_targets(targets_path)
-        if not to_email:
-                print(f"No recipient email configured in {targets_path} (email=...). Aborting.")
-                sys.exit(1)
+        to_email, jobs, include_abend, include_success, report_period = read_targets(targets_path)
+        
         if not jobs:
                 print(f"No jobs configured in {targets_path} (jobs=...). Aborting.")
                 sys.exit(1)
-
+        
         watch_jobs = set(jobs)  # uppercase already from read_targets
-        events = find_abends(folder, watch_jobs)
-        report = build_report(events)
-        subject = f"ABEND Report - {datetime.now().date().isoformat()}"
+        
+        # Daily mode: scan and log to files
+        if daily_mode:
+                abend_log = os.path.join(SCRIPT_DIR, "abends.log")
+                success_log = os.path.join(SCRIPT_DIR, "successes.log")
+                
+                print("Running in daily logging mode...")
+                abend_events, success_events = scan_events(folder, watch_jobs, True, True)
+                
+                abend_count = append_to_log(abend_log, abend_events, 'abend')
+                success_count = append_to_log(success_log, success_events, 'success')
+                
+                print(f"Logged {abend_count} new ABEND event(s) to {abend_log}")
+                print(f"Logged {success_count} new SUCCESS event(s) to {success_log}")
+                return
+        
+        # Report mode: use log files or scan directly
+        if not to_email:
+                print(f"No recipient email configured in {targets_path} (email=...). Aborting.")
+                sys.exit(1)
+        
+        abend_events = []
+        success_events = []
+        
+        # Try to read from log files first
+        abend_log = os.path.join(SCRIPT_DIR, "abends.log")
+        success_log = os.path.join(SCRIPT_DIR, "successes.log")
+        
+        if os.path.exists(abend_log) or os.path.exists(success_log):
+                print("Reading from log files...")
+                if include_abend:
+                        abend_events = read_log_events(abend_log, 'abend')
+                        print(f"Loaded {len(abend_events)} ABEND event(s) from log")
+                if include_success:
+                        success_events = read_log_events(success_log, 'success')
+                        print(f"Loaded {len(success_events)} SUCCESS event(s) from log")
+        else:
+                # Scan directly if no log files exist
+                print("No log files found, scanning directly...")
+                abend_events, success_events = scan_events(folder, watch_jobs, include_abend, include_success)
+        
+        # Filter events based on config
+        if not include_abend:
+                abend_events = []
+        if not include_success:
+                success_events = []
+        
+        # Filter by time period
+        abend_events = filter_events_by_period(abend_events, report_period)
+        success_events = filter_events_by_period(success_events, report_period)
+        
+        print(f"Generating {report_period.capitalize()} report...")
+        report = build_report(abend_events, success_events)
+        subject = f"Job Events Report ({report_period.capitalize()}) - {datetime.now().date().isoformat()}"
+        
         # Attempt to send email using mail command; on failure, print to stdout
         try:
                 send_email_via_mail(to_email, subject, report)
