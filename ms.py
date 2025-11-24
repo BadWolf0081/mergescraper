@@ -96,6 +96,9 @@ def find_abends(folder, watch_jobs):
         all_files = []
         for root, dirs, files in os.walk(folder):
                 for fname in files:
+                        # Only scan files with "TWSMERGE" in the filename
+                        if "TWSMERGE" not in fname:
+                                continue
                         path = os.path.join(root, fname)
                         # Skip typical binary files by extension heuristics (optional)
                         if any(path.lower().endswith(ext) for ext in ('.zip', '.gz', '.tar', '.jpg', '.png', '.exe', '.dll')):
