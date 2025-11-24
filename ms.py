@@ -408,44 +408,14 @@ def create_csv_report(abend_events, success_events, csv_path):
 def send_email_via_mail(to_addr, subject, body, attachment=None):
         """Send email using Linux mail command with optional attachment."""
         if attachment and os.path.exists(attachment):
-                # Try different mail commands with attachment support
-                # Method 1: mailutils format (-A)
+                # Use mailx format with -a for attachment (most common)
                 proc = subprocess.Popen(
-                        ['mail', '-s', subject, '-A', attachment, to_addr],
+                        ['mail', '-s', subject, '-a', attachment, to_addr],
                         stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE
                 )
                 stdout, stderr = proc.communicate(input=body.encode('utf-8'))
-                
-                # If that failed, try mailx format (-a)
-                if proc.returncode != 0:
-                        proc = subprocess.Popen(
-                                ['mail', '-s', subject, '-a', attachment, to_addr],
-                                stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE
-                        )
-                        stdout, stderr = proc.communicate(input=body.encode('utf-8'))
-                
-                # If still failing, try with uuencode piped method
-                if proc.returncode != 0:
-                        # Fallback: use mutt if available
-                        proc = subprocess.Popen(
-                                ['which', 'mutt'],
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE
-                        )
-                        proc.communicate()
-                        if proc.returncode == 0:
-                                proc = subprocess.Popen(
-                                        ['mutt', '-s', subject, '-a', attachment, '--', to_addr],
-                                        stdin=subprocess.PIPE,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE
-                                )
-                                stdout, stderr = proc.communicate(input=body.encode('utf-8'))
-                
                 if proc.returncode != 0:
                         raise RuntimeError(f"mail command failed: {stderr.decode('utf-8')}")
         else:
