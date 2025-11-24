@@ -339,28 +339,55 @@ def build_report(abend_events, success_events):
         return "\n".join(report_lines)
 
 def append_to_log(log_path, events, event_type):
-        """Append events to a daily log file with deduplication."""
-        # Read existing events to avoid duplicates
-        existing = set()
+        """Append events to a daily log file with deduplication based on core event identity."""
+        # Read existing events and track by core identity (timestamp|job|schedule|server)
+        existing_events = {}  # key: core_id, value: full line
         if os.path.exists(log_path):
                 with open(log_path, 'r') as f:
                         for line in f:
-                                existing.add(line.strip())
+                                line = line.strip()
+                                if not line:
+                                        continue
+                                parts = line.split('|')
+                                if len(parts) >= 4:
+                                        # Core identity: timestamp|job|schedule|server
+                                        core_id = f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}"
+                                        # Keep the entry with runtime if it exists, otherwise the first one
+                                        if core_id not in existing_events or (len(parts) > 5 and parts[5]):
+                                                existing_events[core_id] = line
         
-        # Append new unique events
+        # Write back all events (existing + new unique ones)
         new_count = 0
-        with open(log_path, 'a') as f:
+        with open(log_path, 'w') as f:
+                # Write existing events first
+                for line in existing_events.values():
+                        f.write(line + "\n")
+                
+                # Add new unique events
                 for e in events:
                         dt_s = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
                         server = e.get('server', '')
                         start_time_s = e['start_time'].strftime("%Y-%m-%d %H:%M:%S") if e.get('start_time') else ''
                         runtime = e.get('runtime', '')
+                        
+                        # Core identity for deduplication
+                        core_id = f"{dt_s}|{e['job']}|{e['sched']}|{server}"
+                        
                         # Format: timestamp|job|schedule|server|start_time|runtime|file:line
                         log_line = f"{dt_s}|{e['job']}|{e['sched']}|{server}|{start_time_s}|{runtime}|{e['file']}:{e['line_no']}"
-                        if log_line not in existing:
+                        
+                        # Only add if not already existing, or if this one has runtime and existing doesn't
+                        if core_id not in existing_events:
                                 f.write(log_line + "\n")
-                                existing.add(log_line)
+                                existing_events[core_id] = log_line
                                 new_count += 1
+                        elif runtime and core_id in existing_events:
+                                # Update existing entry if new one has runtime data
+                                existing_line = existing_events[core_id]
+                                existing_parts = existing_line.split('|')
+                                if len(existing_parts) <= 5 or not existing_parts[5]:
+                                        # Replace the existing entry without runtime
+                                        new_count += 1
         
         return new_count
 
