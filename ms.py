@@ -304,8 +304,9 @@ def append_to_log(log_path, events, event_type):
         with open(log_path, 'a') as f:
                 for e in events:
                         dt_s = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
-                        server_info = f"|{e['server']}" if 'server' in e else ""
-                        log_line = f"{dt_s}|{e['job']}|{e['sched']}{server_info}|{e['file']}:{e['line_no']}"
+                        server = e.get('server', '')
+                        # Format: timestamp|job|schedule|server|file:line
+                        log_line = f"{dt_s}|{e['job']}|{e['sched']}|{server}|{e['file']}:{e['line_no']}"
                         if log_line not in existing:
                                 f.write(log_line + "\n")
                                 existing.add(log_line)
@@ -353,10 +354,12 @@ def read_log_events(log_path, event_type):
                                 continue
                         
                         try:
+                                # Format: timestamp|job|schedule|server|file:line
                                 dt = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
                                 job = parts[1]
                                 sched = parts[2]
-                                file_info = parts[3]
+                                server = parts[3] if len(parts) > 4 else ''
+                                file_info = parts[4] if len(parts) > 4 else parts[3]
                                 
                                 event = {
                                         'dt': dt,
@@ -368,9 +371,8 @@ def read_log_events(log_path, event_type):
                                 }
                                 
                                 # Add server info for success events
-                                if event_type == 'success' and len(parts) > 4:
-                                        event['server'] = parts[2]
-                                        event['sched'] = parts[3] if len(parts) > 3 else ''
+                                if event_type == 'success' and server:
+                                        event['server'] = server
                                 
                                 events.append(event)
                         except (ValueError, IndexError):
