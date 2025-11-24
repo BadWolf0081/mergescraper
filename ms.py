@@ -128,7 +128,8 @@ def job_matches(job, watch_jobs):
         - @JOBNAME@ matches *JOBNAME*
         - JOB@NAME matches JOB*NAME
         """
-        if not watch_jobs:
+        # If no patterns specified, match everything
+        if not watch_jobs or len(watch_jobs) == 0:
                 return True
         
         job_upper = job.upper()
@@ -568,6 +569,7 @@ def main():
                 sys.exit(1)
         
         watch_jobs = set(jobs)  # uppercase already from read_targets
+        print(f"Filtering for jobs matching: {', '.join(watch_jobs)}")
         
         # Daily mode: scan and log to files
         if daily_mode:
