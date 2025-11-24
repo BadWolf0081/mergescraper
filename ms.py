@@ -5,7 +5,7 @@ import sys
 import subprocess
 import argparse
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 import configparser
 
 """
@@ -58,7 +58,10 @@ def ensure_config_files(config_path, targets_path):
         """Create template config files if they don't exist."""
         if not os.path.exists(config_path):
                 cfg = configparser.ConfigParser()
-                cfg['scan'] = {'folder': '.'}
+                cfg['scan'] = {
+                        'folder': '.',
+                        'retention_days': '90'  # Keep logs for 90 days by default
+                }
                 with open(config_path, 'w') as f:
                         cfg.write(f)
 
@@ -82,7 +85,8 @@ def read_scan_config(config_path):
                 raise SystemExit(f"Missing [scan] section in {config_path}")
         section = cfg['scan']
         folder = section.get('folder', '.')
-        return folder
+        retention_days = section.getint('retention_days', 90)  # Default 90 days
+        return folder, retention_days
 
 def read_targets(targets_path):
         email = None
@@ -339,6 +343,42 @@ def build_report(abend_events, success_events):
         
         return "\n".join(report_lines)
 
+def cleanup_old_logs(log_path, retention_days):
+        """Remove log entries older than retention_days."""
+        if not os.path.exists(log_path):
+                return 0
+        
+        cutoff_date = datetime.now() - timedelta(days=retention_days)
+        kept_lines = []
+        removed_count = 0
+        
+        with open(log_path, 'r') as f:
+                for line in f:
+                        line = line.strip()
+                        if not line:
+                                continue
+                        parts = line.split('|')
+                        if len(parts) < 1:
+                                continue
+                        
+                        try:
+                                # Parse timestamp from first field
+                                dt = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
+                                if dt >= cutoff_date:
+                                        kept_lines.append(line)
+                                else:
+                                        removed_count += 1
+                        except ValueError:
+                                # Keep lines we can't parse
+                                kept_lines.append(line)
+        
+        # Rewrite log file with only kept entries
+        with open(log_path, 'w') as f:
+                for line in kept_lines:
+                        f.write(line + "\n")
+        
+        return removed_count
+
 def append_to_log(log_path, events, event_type):
         """Append events to a daily log file with deduplication based on core event identity."""
         # Read existing events and track by core identity (timestamp|job|schedule|server)
@@ -561,7 +601,7 @@ def main():
         daily_mode = args.daily
         
         ensure_config_files(config_path, targets_path)
-        folder = read_scan_config(config_path)
+        folder, retention_days = read_scan_config(config_path)
         to_email, jobs, include_abend, include_success, report_period = read_targets(targets_path)
         
         if not jobs:
@@ -584,6 +624,12 @@ def main():
                 
                 print(f"Logged {abend_count} new ABEND event(s) to {abend_log}")
                 print(f"Logged {success_count} new SUCCESS event(s) to {success_log}")
+                
+                # Cleanup old entries
+                print(f"Cleaning up entries older than {retention_days} days...")
+                abend_removed = cleanup_old_logs(abend_log, retention_days)
+                success_removed = cleanup_old_logs(success_log, retention_days)
+                print(f"Removed {abend_removed} old ABEND entries, {success_removed} old SUCCESS entries")
                 return
         
         # Report mode: use log files or scan directly
