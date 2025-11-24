@@ -46,11 +46,19 @@ SUCCESS_RE = re.compile(
         re.IGNORECASE
 )
 
-# Regex for job execution start
+# Regex for job execution start (schedule level)
 # Example: 07:01:39 24.11.2025|BATCHMAN:AWSBHT075I Changing job stream JOBS[(0731 11/23/25),(JOBS)] status to EXEC.
 START_RE = re.compile(
         r'(?P<time>\d{2}:\d{2}:\d{2})\s+'
         r'(?P<date>\d{2}\.\d{2}\.\d{4}).*?Changing job stream\s+(?P<sched>[^\[\].\s]+)\[.*?\]\s+status to EXEC',
+        re.IGNORECASE
+)
+
+# Regex for individual job launch
+# Example: 07:01:39 24.11.2025|BATCHMAN:AWSBHT036I Attempting to launch JOBS[(0731 11/23/25),(JOBS)].LS on VEL3009LAM.
+JOB_LAUNCH_RE = re.compile(
+        r'(?P<time>\d{2}:\d{2}:\d{2})\s+'
+        r'(?P<date>\d{2}\.\d{2}\.\d{4}).*?Attempting to launch\s+(?P<sched>[^\[\].\s]+)\[.*?\]\.(?P<job>[^\s]+)\s+on',
         re.IGNORECASE
 )
 
@@ -161,7 +169,7 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
         """
         abend_events = []
         success_events = []
-        # Track schedule start times: key = sched, value = datetime
+        # Track start times: key = (job, sched) or sched, value = datetime
         job_start_times = {}
         if not os.path.exists(folder):
                 raise SystemExit(f"Configured folder does not exist: {folder}")
@@ -196,7 +204,21 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                 try:
                         with open(path, 'r', errors='ignore') as fh:
                                 for line_no, line in enumerate(fh, start=1):
-                                        # Check for job START events (always track for runtime calculation)
+                                        # Check for individual JOB LAUNCH events (more specific than schedule start)
+                                        m_launch = JOB_LAUNCH_RE.search(line)
+                                        if m_launch:
+                                                job = m_launch.group('job').upper()
+                                                sched = m_launch.group('sched')
+                                                date_s = m_launch.group('date')
+                                                time_s = m_launch.group('time')
+                                                try:
+                                                        dt = datetime.strptime(f"{date_s} {time_s}", "%d.%m.%Y %H:%M:%S")
+                                                        # Store start time keyed by (job, schedule) for specific job
+                                                        job_start_times[(job, sched)] = dt
+                                                except ValueError:
+                                                        pass
+                                        
+                                        # Check for SCHEDULE START events (fallback if no job-specific launch found)
                                         m_start = START_RE.search(line)
                                         if m_start:
                                                 sched = m_start.group('sched')
@@ -204,8 +226,9 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                                                 time_s = m_start.group('time')
                                                 try:
                                                         dt = datetime.strptime(f"{date_s} {time_s}", "%d.%m.%Y %H:%M:%S")
-                                                        # Store start time keyed by schedule only
-                                                        job_start_times[sched] = dt
+                                                        # Store start time keyed by schedule only (fallback)
+                                                        if sched not in job_start_times:
+                                                                job_start_times[sched] = dt
                                                 except ValueError:
                                                         pass
                                         
@@ -225,8 +248,8 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                                                         if not job_matches(job, watch_jobs):
                                                                 continue
                                                         
-                                                        # Calculate runtime if start time exists for this schedule
-                                                        start_time = job_start_times.get(sched)
+                                                        # Calculate runtime - check job-specific start first, then schedule fallback
+                                                        start_time = job_start_times.get((job, sched)) or job_start_times.get(sched)
                                                         runtime = None
                                                         if start_time:
                                                                 duration = dt - start_time
@@ -258,17 +281,17 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                                                                 dt = datetime.strptime(f"{date_s} {time_s}", "%d.%m.%Y %H:%M:%S")
                                                         except ValueError:
                                                                 continue
-                                                        if not job_matches(job, watch_jobs):
-                                                                continue
-                                                        
-                                                        # Calculate runtime if start time exists for this schedule
-                                                        start_time = job_start_times.get(sched)
-                                                        runtime = None
-                                                        if start_time:
-                                                                duration = dt - start_time
-                                                                runtime = str(duration).split('.')[0]  # Remove microseconds
-                                                        
-                                                        success_events.append({
+                                                if not job_matches(job, watch_jobs):
+                                                        continue
+                                                
+                                                # Calculate runtime if start time exists for this job or schedule
+                                                start_time = job_start_times.get((job, sched)) or job_start_times.get(sched)
+                                                runtime = None
+                                                if start_time:
+                                                        duration = dt - start_time
+                                                        runtime = str(duration).split('.')[0]  # Remove microseconds
+                                                
+                                                success_events.append({
                                                                 'dt': dt,
                                                                 'month': (dt.month, dt.strftime('%B')),
                                                                 'job': job,
@@ -334,7 +357,7 @@ def build_report(abend_events, success_events):
                         for e in sorted(g['items'], key=lambda x: x['dt']):
                                 dt_s = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
                                 server = e.get('server', '')
-                                sched_info = f"{e['sched']}#{server}" if server else e['sched']
+                                sched_info = f"{server}#{e['sched']}" if server else e['sched']
                                 report_lines.append(f" - {e['job']} (schedule {sched_info}) at {dt_s}")
                 report_lines.append("")
         
