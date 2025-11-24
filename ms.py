@@ -413,6 +413,12 @@ def read_log_events(log_path, event_type):
                                 runtime = parts[5] if len(parts) > 6 else ''
                                 file_info = parts[6] if len(parts) > 6 else parts[3]
                                 
+                                # Handle old log format where schedule might contain CPU#SCHEDULE
+                                if '#' in sched and not server:
+                                        parts_sched = sched.split('#', 1)
+                                        server = parts_sched[0]
+                                        sched = parts_sched[1]
+                                
                                 start_time = None
                                 if start_time_s:
                                         try:
@@ -431,8 +437,8 @@ def read_log_events(log_path, event_type):
                                         'runtime': runtime if runtime else None
                                 }
                                 
-                                # Add server info for success events
-                                if event_type == 'success' and server:
+                                # Add server info for all events
+                                if server:
                                         event['server'] = server
                                 
                                 events.append(event)
