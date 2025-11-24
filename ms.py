@@ -281,17 +281,17 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                                                                 dt = datetime.strptime(f"{date_s} {time_s}", "%d.%m.%Y %H:%M:%S")
                                                         except ValueError:
                                                                 continue
-                                                if not job_matches(job, watch_jobs):
-                                                        continue
-                                                
-                                                # Calculate runtime if start time exists for this job or schedule
-                                                start_time = job_start_times.get((job, sched)) or job_start_times.get(sched)
-                                                runtime = None
-                                                if start_time:
-                                                        duration = dt - start_time
-                                                        runtime = str(duration).split('.')[0]  # Remove microseconds
-                                                
-                                                success_events.append({
+                                                        if not job_matches(job, watch_jobs):
+                                                                continue
+                                                        
+                                                        # Calculate runtime if start time exists for this job or schedule
+                                                        start_time = job_start_times.get((job, sched)) or job_start_times.get(sched)
+                                                        runtime = None
+                                                        if start_time:
+                                                                duration = dt - start_time
+                                                                runtime = str(duration).split('.')[0]  # Remove microseconds
+                                                        
+                                                        success_events.append({
                                                                 'dt': dt,
                                                                 'month': (dt.month, dt.strftime('%B')),
                                                                 'job': job,
