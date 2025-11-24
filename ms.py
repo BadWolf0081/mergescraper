@@ -155,7 +155,7 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
         """
         abend_events = []
         success_events = []
-        # Track job start times: key = (job, sched), value = datetime
+        # Track schedule start times: key = sched, value = datetime
         job_start_times = {}
         if not os.path.exists(folder):
                 raise SystemExit(f"Configured folder does not exist: {folder}")
@@ -193,14 +193,13 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                                         # Check for job START events (always track for runtime calculation)
                                         m_start = START_RE.search(line)
                                         if m_start:
-                                                job = m_start.group('job').upper()
                                                 sched = m_start.group('sched')
                                                 date_s = m_start.group('date')
                                                 time_s = m_start.group('time')
                                                 try:
                                                         dt = datetime.strptime(f"{date_s} {time_s}", "%d.%m.%Y %H:%M:%S")
-                                                        # Store start time keyed by job and schedule
-                                                        job_start_times[(job, sched)] = dt
+                                                        # Store start time keyed by schedule only
+                                                        job_start_times[sched] = dt
                                                 except ValueError:
                                                         pass
                                         
@@ -219,8 +218,8 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                                                         if not job_matches(job, watch_jobs):
                                                                 continue
                                                         
-                                                        # Calculate runtime if start time exists
-                                                        start_time = job_start_times.get((job, sched))
+                                                        # Calculate runtime if start time exists for this schedule
+                                                        start_time = job_start_times.get(sched)
                                                         runtime = None
                                                         if start_time:
                                                                 duration = dt - start_time
@@ -254,8 +253,8 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                                                         if not job_matches(job, watch_jobs):
                                                                 continue
                                                         
-                                                        # Calculate runtime if start time exists
-                                                        start_time = job_start_times.get((job, sched))
+                                                        # Calculate runtime if start time exists for this schedule
+                                                        start_time = job_start_times.get(sched)
                                                         runtime = None
                                                         if start_time:
                                                                 duration = dt - start_time
