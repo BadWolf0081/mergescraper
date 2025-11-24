@@ -183,12 +183,11 @@ def send_email_via_mail(to_addr, subject, body):
                 ['mail', '-s', subject, to_addr],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
+                stderr=subprocess.PIPE
         )
-        stdout, stderr = proc.communicate(input=body)
+        stdout, stderr = proc.communicate(input=body.encode('utf-8'))
         if proc.returncode != 0:
-                raise RuntimeError(f"mail command failed: {stderr}")
+                raise RuntimeError(f"mail command failed: {stderr.decode('utf-8')}")
 
 def main():
         ensure_config_files()
