@@ -4,6 +4,7 @@ import re
 import sys
 import subprocess
 import argparse
+import csv
 from datetime import datetime
 import configparser
 
@@ -279,8 +280,9 @@ def build_report(abend_events, success_events):
                         report_lines.append(f"\nIn {g['name']} these successes occurred:")
                         for e in sorted(g['items'], key=lambda x: x['dt']):
                                 dt_s = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
-                                server_info = f" on {e['server']}" if 'server' in e else ""
-                                report_lines.append(f" - {e['job']} (schedule {e['sched']}){server_info} at {dt_s}")
+                                server = e.get('server', '')
+                                sched_info = f"{server}#{e['sched']}" if server else e['sched']
+                                report_lines.append(f" - {e['job']} (schedule {sched_info}) at {dt_s}")
                 report_lines.append("")
         
         if not abend_events and not success_events:
@@ -376,7 +378,56 @@ def read_log_events(log_path, event_type):
         
         return events
 
-def send_email_via_mail(to_addr, subject, body):
+def create_csv_report(abend_events, success_events, csv_path):
+        """Create a CSV file with all events in spreadsheet format."""
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                # Write header
+                writer.writerow(['CPU', 'Schedule', 'Job', 'State', 'Time'])
+                
+                # Write ABEND events
+                for e in sorted(abend_events, key=lambda x: x['dt']):
+                        cpu = e.get('server', '')  # ABEND events may not have server, use empty
+                        schedule = e['sched']
+                        job = e['job']
+                        state = 'ABEND'
+                        time_str = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
+                        writer.writerow([cpu, schedule, job, state, time_str])
+                
+                # Write SUCCESS events
+                for e in sorted(success_events, key=lambda x: x['dt']):
+                        cpu = e.get('server', '')
+                        schedule = e['sched']
+                        job = e['job']
+                        state = 'SUCCESS'
+                        time_str = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
+                        writer.writerow([cpu, schedule, job, state, time_str])
+        
+        return csv_path
+
+def send_email_via_mail(to_addr, subject, body, attachment=None):
+        """Send email using Linux mail command with optional attachment."""
+        if attachment and os.path.exists(attachment):
+                # Use mail with attachment (requires mailutils)
+                proc = subprocess.Popen(
+                        ['mail', '-s', subject, '-A', attachment, to_addr],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                )
+        else:
+                # Use mail command without attachment
+                proc = subprocess.Popen(
+                        ['mail', '-s', subject, to_addr],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                )
+        stdout, stderr = proc.communicate(input=body.encode('utf-8'))
+        if proc.returncode != 0:
+                raise RuntimeError(f"mail command failed: {stderr.decode('utf-8')}")
+
+def send_email_via_mail_legacy(to_addr, subject, body):
         """Send email using Linux mail command."""
         # Use mail command (from mailutils or mailx)
         proc = subprocess.Popen(
@@ -469,14 +520,25 @@ def main():
         report = build_report(abend_events, success_events)
         subject = f"Job Events Report ({report_period.capitalize()}) - {datetime.now().date().isoformat()}"
         
+        # Create CSV file
+        csv_path = os.path.join(SCRIPT_DIR, f"job_events_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        try:
+                create_csv_report(abend_events, success_events, csv_path)
+                print(f"CSV report created: {csv_path}")
+        except Exception as exc:
+                print(f"Warning: Failed to create CSV: {exc}")
+                csv_path = None
+        
         # Attempt to send email using mail command; on failure, print to stdout
         try:
-                send_email_via_mail(to_email, subject, report)
-                print(f"Report sent to {to_email}")
+                send_email_via_mail(to_email, subject, report, csv_path)
+                print(f"Report sent to {to_email}" + (f" with attachment {os.path.basename(csv_path)}" if csv_path else ""))
         except Exception as exc:
                 print("Failed to send email. Printing report to stdout.\n")
                 print(report)
                 print("\nError sending email:", exc)
+                if csv_path and os.path.exists(csv_path):
+                        print(f"\nCSV file available at: {csv_path}")
                 sys.exit(2)
 
 if __name__ == '__main__':
