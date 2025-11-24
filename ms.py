@@ -45,6 +45,14 @@ SUCCESS_RE = re.compile(
         re.IGNORECASE
 )
 
+# Regex for job execution start
+# Example: 07:01:39 24.11.2025|BATCHMAN:AWSBHT075I Changing job stream JOBS[(0731 11/23/25),(JOBS)] status to EXEC.
+START_RE = re.compile(
+        r'(?P<time>\d{2}:\d{2}:\d{2})\s+'
+        r'(?P<date>\d{2}\.\d{2}\.\d{4}).*?Changing job stream\s+(?P<sched>[^\[\].\s]+)\[.*?\]\s+status to EXEC',
+        re.IGNORECASE
+)
+
 def ensure_config_files(config_path, targets_path):
         """Create template config files if they don't exist."""
         if not os.path.exists(config_path):
@@ -142,11 +150,13 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
         """
         Walk files under folder, extract abend and/or success events for jobs in watch_jobs.
         Returns tuple: (abend_events, success_events)
-        Each is a list of dicts: {'dt': datetime, 'month': (num,name), 'job': str, 'sched': str, 'file': str, 'line': str}
+        Each is a list of dicts: {'dt': datetime, 'month': (num,name), 'job': str, 'sched': str, 'file': str, 'line': str, 'start_time': datetime, 'runtime': str}
         Supports @ wildcard in job patterns (e.g., JOBNAME@ matches JOBNAME*)
         """
         abend_events = []
         success_events = []
+        # Track job start times: key = (job, sched), value = datetime
+        job_start_times = {}
         if not os.path.exists(folder):
                 raise SystemExit(f"Configured folder does not exist: {folder}")
         
@@ -180,6 +190,20 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                 try:
                         with open(path, 'r', errors='ignore') as fh:
                                 for line_no, line in enumerate(fh, start=1):
+                                        # Check for job START events (always track for runtime calculation)
+                                        m_start = START_RE.search(line)
+                                        if m_start:
+                                                job = m_start.group('job').upper()
+                                                sched = m_start.group('sched')
+                                                date_s = m_start.group('date')
+                                                time_s = m_start.group('time')
+                                                try:
+                                                        dt = datetime.strptime(f"{date_s} {time_s}", "%d.%m.%Y %H:%M:%S")
+                                                        # Store start time keyed by job and schedule
+                                                        job_start_times[(job, sched)] = dt
+                                                except ValueError:
+                                                        pass
+                                        
                                         # Check for ABEND events
                                         if track_abends:
                                                 m = ABEND_RE.search(line)
@@ -194,6 +218,14 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                                                                 continue
                                                         if not job_matches(job, watch_jobs):
                                                                 continue
+                                                        
+                                                        # Calculate runtime if start time exists
+                                                        start_time = job_start_times.get((job, sched))
+                                                        runtime = None
+                                                        if start_time:
+                                                                duration = dt - start_time
+                                                                runtime = str(duration).split('.')[0]  # Remove microseconds
+                                                        
                                                         abend_events.append({
                                                                 'dt': dt,
                                                                 'month': (dt.month, dt.strftime('%B')),
@@ -201,7 +233,9 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                                                                 'sched': sched,
                                                                 'file': path,
                                                                 'line_no': line_no,
-                                                                'raw': line.strip()
+                                                                'raw': line.strip(),
+                                                                'start_time': start_time,
+                                                                'runtime': runtime
                                                         })
                                         
                                         # Check for SUCCESS events
@@ -219,6 +253,14 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                                                                 continue
                                                         if not job_matches(job, watch_jobs):
                                                                 continue
+                                                        
+                                                        # Calculate runtime if start time exists
+                                                        start_time = job_start_times.get((job, sched))
+                                                        runtime = None
+                                                        if start_time:
+                                                                duration = dt - start_time
+                                                                runtime = str(duration).split('.')[0]  # Remove microseconds
+                                                        
                                                         success_events.append({
                                                                 'dt': dt,
                                                                 'month': (dt.month, dt.strftime('%B')),
@@ -227,7 +269,9 @@ def scan_events(folder, watch_jobs, track_abends=True, track_successes=False):
                                                                 'server': server,
                                                                 'file': path,
                                                                 'line_no': line_no,
-                                                                'raw': line.strip()
+                                                                'raw': line.strip(),
+                                                                'start_time': start_time,
+                                                                'runtime': runtime
                                                         })
                 except (OSError, UnicodeError):
                         # ignore unreadable files
@@ -305,8 +349,10 @@ def append_to_log(log_path, events, event_type):
                 for e in events:
                         dt_s = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
                         server = e.get('server', '')
-                        # Format: timestamp|job|schedule|server|file:line
-                        log_line = f"{dt_s}|{e['job']}|{e['sched']}|{server}|{e['file']}:{e['line_no']}"
+                        start_time_s = e['start_time'].strftime("%Y-%m-%d %H:%M:%S") if e.get('start_time') else ''
+                        runtime = e.get('runtime', '')
+                        # Format: timestamp|job|schedule|server|start_time|runtime|file:line
+                        log_line = f"{dt_s}|{e['job']}|{e['sched']}|{server}|{start_time_s}|{runtime}|{e['file']}:{e['line_no']}"
                         if log_line not in existing:
                                 f.write(log_line + "\n")
                                 existing.add(log_line)
@@ -354,12 +400,21 @@ def read_log_events(log_path, event_type):
                                 continue
                         
                         try:
-                                # Format: timestamp|job|schedule|server|file:line
+                                # Format: timestamp|job|schedule|server|start_time|runtime|file:line
                                 dt = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
                                 job = parts[1]
                                 sched = parts[2]
-                                server = parts[3] if len(parts) > 4 else ''
-                                file_info = parts[4] if len(parts) > 4 else parts[3]
+                                server = parts[3] if len(parts) > 6 else ''
+                                start_time_s = parts[4] if len(parts) > 6 else ''
+                                runtime = parts[5] if len(parts) > 6 else ''
+                                file_info = parts[6] if len(parts) > 6 else parts[3]
+                                
+                                start_time = None
+                                if start_time_s:
+                                        try:
+                                                start_time = datetime.strptime(start_time_s, "%Y-%m-%d %H:%M:%S")
+                                        except ValueError:
+                                                pass
                                 
                                 event = {
                                         'dt': dt,
@@ -367,7 +422,9 @@ def read_log_events(log_path, event_type):
                                         'job': job,
                                         'sched': sched,
                                         'file': file_info,
-                                        'line_no': 0
+                                        'line_no': 0,
+                                        'start_time': start_time,
+                                        'runtime': runtime if runtime else None
                                 }
                                 
                                 # Add server info for success events
@@ -385,7 +442,7 @@ def create_csv_report(abend_events, success_events, csv_path):
         with open(csv_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 # Write header
-                writer.writerow(['CPU', 'Schedule', 'Job', 'State', 'Time'])
+                writer.writerow(['CPU', 'Schedule', 'Job', 'State', 'Start Time', 'End Time', 'Runtime'])
                 
                 # Write ABEND events
                 for e in sorted(abend_events, key=lambda x: x['dt']):
@@ -393,8 +450,10 @@ def create_csv_report(abend_events, success_events, csv_path):
                         schedule = e['sched']
                         job = e['job']
                         state = 'ABEND'
-                        time_str = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
-                        writer.writerow([cpu, schedule, job, state, time_str])
+                        start_time = e.get('start_time').strftime("%Y-%m-%d %H:%M:%S") if e.get('start_time') else ''
+                        end_time = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
+                        runtime = e.get('runtime', '')
+                        writer.writerow([cpu, schedule, job, state, start_time, end_time, runtime])
                 
                 # Write SUCCESS events
                 for e in sorted(success_events, key=lambda x: x['dt']):
@@ -402,8 +461,10 @@ def create_csv_report(abend_events, success_events, csv_path):
                         schedule = e['sched']
                         job = e['job']
                         state = 'SUCCESS'
-                        time_str = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
-                        writer.writerow([cpu, schedule, job, state, time_str])
+                        start_time = e.get('start_time').strftime("%Y-%m-%d %H:%M:%S") if e.get('start_time') else ''
+                        end_time = e['dt'].strftime("%Y-%m-%d %H:%M:%S")
+                        runtime = e.get('runtime', '')
+                        writer.writerow([cpu, schedule, job, state, start_time, end_time, runtime])
         
         return csv_path
 
