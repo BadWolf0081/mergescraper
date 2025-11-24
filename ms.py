@@ -78,13 +78,43 @@ def read_targets(targets_path):
                         if k == 'email':
                                 email = v
                         elif k == 'jobs':
+                                # Keep @ wildcard intact, convert to uppercase
                                 jobs = [j.strip().upper() for j in v.split(',') if j.strip()]
         return email, jobs
+
+def job_matches(job, watch_jobs):
+        """
+        Check if a job matches any pattern in watch_jobs.
+        Supports @ wildcard anywhere: 
+        - JOBNAME@ matches JOBNAME*
+        - @JOBNAME matches *JOBNAME
+        - @JOBNAME@ matches *JOBNAME*
+        - JOB@NAME matches JOB*NAME
+        """
+        if not watch_jobs:
+                return True
+        
+        job_upper = job.upper()
+        for pattern in watch_jobs:
+                if '@' in pattern:
+                        # Convert @ wildcards to regex pattern
+                        # Escape any special regex characters except @
+                        regex_pattern = re.escape(pattern).replace(r'\@', '.*')
+                        # Add anchors for start and end
+                        regex_pattern = '^' + regex_pattern + '$'
+                        if re.match(regex_pattern, job_upper):
+                                return True
+                else:
+                        # Exact match
+                        if job_upper == pattern:
+                                return True
+        return False
 
 def find_abends(folder, watch_jobs):
         """
         Walk files under folder, extract abend events for jobs in watch_jobs.
         Returns list of dicts: {'dt': datetime, 'month': (num,name), 'job': str, 'sched': str, 'file': str, 'line': str}
+        Supports @ wildcard in job patterns (e.g., JOBNAME@ matches JOBNAME*)
         """
         events = []
         if not os.path.exists(folder):
@@ -132,7 +162,7 @@ def find_abends(folder, watch_jobs):
                                         except ValueError:
                                                 # skip unparsable date/time
                                                 continue
-                                        if watch_jobs and job not in watch_jobs:
+                                        if not job_matches(job, watch_jobs):
                                                 continue
                                         events.append({
                                                 'dt': dt,
